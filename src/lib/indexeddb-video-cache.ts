@@ -120,9 +120,13 @@ export async function openIndexedDBVideoCache(): Promise<IDBDatabase> {
         const manifestStore = db.createObjectStore(MANIFESTS_STORE, {
           keyPath: 'cacheKey',
         });
-        manifestStore.createIndex('sourceVideoEpisode', ['source', 'videoId', 'episodeIndex'], {
-          unique: true,
-        });
+        manifestStore.createIndex(
+          'sourceVideoEpisode',
+          ['source', 'videoId', 'episodeIndex'],
+          {
+            unique: true,
+          }
+        );
         manifestStore.createIndex('completed', 'completed', { unique: false });
         manifestStore.createIndex('updatedAt', 'updatedAt', { unique: false });
       }
@@ -152,7 +156,9 @@ export async function getIndexedDBVideoManifestByCacheKey(
   const db = await openIndexedDBVideoCache();
   const tx = db.transaction([MANIFESTS_STORE], 'readonly');
   const store = tx.objectStore(MANIFESTS_STORE);
-  return requestToPromise<IndexedDBVideoCacheManifest | undefined>(store.get(cacheKey));
+  return requestToPromise<IndexedDBVideoCacheManifest | undefined>(
+    store.get(cacheKey)
+  );
 }
 
 export async function getIndexedDBVideoManifestByEpisode(
@@ -174,7 +180,11 @@ export async function isIndexedDBVideoDownloaded(
   videoId: string,
   episodeIndex: number
 ): Promise<boolean> {
-  const manifest = await getIndexedDBVideoManifestByEpisode(source, videoId, episodeIndex);
+  const manifest = await getIndexedDBVideoManifestByEpisode(
+    source,
+    videoId,
+    episodeIndex
+  );
   return Boolean(manifest?.completed && manifest.segmentCount > 0);
 }
 
@@ -185,9 +195,10 @@ export async function saveIndexedDBVideoSegment(input: {
   mimeType?: string;
 }): Promise<number> {
   const db = await openIndexedDBVideoCache();
-  const blob = input.data instanceof Blob
-    ? input.data
-    : new Blob([input.data], { type: input.mimeType || 'video/MP2T' });
+  const blob =
+    input.data instanceof Blob
+      ? input.data
+      : new Blob([input.data], { type: input.mimeType || 'video/MP2T' });
 
   const record: IndexedDBVideoSegmentRecord = {
     id: makeSegmentId(input.cacheKey, input.index),
@@ -217,9 +228,12 @@ export async function saveIndexedDBVideoAsset(input: {
   mimeType?: string;
 }): Promise<number> {
   const db = await openIndexedDBVideoCache();
-  const blob = input.data instanceof Blob
-    ? input.data
-    : new Blob([input.data], { type: input.mimeType || 'application/octet-stream' });
+  const blob =
+    input.data instanceof Blob
+      ? input.data
+      : new Blob([input.data], {
+          type: input.mimeType || 'application/octet-stream',
+        });
 
   const record: IndexedDBVideoAssetRecord = {
     id: makeAssetId(input.cacheKey, input.name),
@@ -267,30 +281,66 @@ async function getIndexedDBVideoAsset(
   );
 }
 
-export async function getIndexedDBVideoCacheSize(cacheKey: string): Promise<number> {
+export async function getIndexedDBVideoSegments(
+  cacheKey: string
+): Promise<Array<{ index: number; data: Blob; size: number }>> {
+  const db = await openIndexedDBVideoCache();
+  const tx = db.transaction([SEGMENTS_STORE], 'readonly');
+  const store = tx.objectStore(SEGMENTS_STORE);
+  const index = store.index('cacheKey');
+
+  return new Promise((resolve, reject) => {
+    const segments: Array<{ index: number; data: Blob; size: number }> = [];
+    const request = index.openCursor(IDBKeyRange.only(cacheKey));
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        segments.sort((a, b) => a.index - b.index);
+        resolve(segments);
+        return;
+      }
+
+      const record = cursor.value as IndexedDBVideoSegmentRecord;
+      segments.push({
+        index: record.index,
+        data: record.data,
+        size: record.size,
+      });
+      cursor.continue();
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getIndexedDBVideoCacheSize(
+  cacheKey: string
+): Promise<number> {
   const manifest = await getIndexedDBVideoManifestByCacheKey(cacheKey);
   if (manifest?.totalSize) return manifest.totalSize;
 
   const db = await openIndexedDBVideoCache();
   const tx = db.transaction([SEGMENTS_STORE, ASSETS_STORE], 'readonly');
 
-  const sumByIndex = (storeName: string) => new Promise<number>((resolve, reject) => {
-    const store = tx.objectStore(storeName);
-    const index = store.index('cacheKey');
-    const request = index.openCursor(IDBKeyRange.only(cacheKey));
-    let total = 0;
+  const sumByIndex = (storeName: string) =>
+    new Promise<number>((resolve, reject) => {
+      const store = tx.objectStore(storeName);
+      const index = store.index('cacheKey');
+      const request = index.openCursor(IDBKeyRange.only(cacheKey));
+      let total = 0;
 
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) {
-        resolve(total);
-        return;
-      }
-      total += Number((cursor.value as { size?: number }).size || 0);
-      cursor.continue();
-    };
-    request.onerror = () => reject(request.error);
-  });
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(total);
+          return;
+        }
+        total += Number((cursor.value as { size?: number }).size || 0);
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+    });
 
   const [segmentSize, assetSize] = await Promise.all([
     sumByIndex(SEGMENTS_STORE),
@@ -316,9 +366,10 @@ export async function saveIndexedDBVideoManifest(input: {
   const db = await openIndexedDBVideoCache();
   const existing = await getIndexedDBVideoManifestByCacheKey(input.cacheKey);
   const now = Date.now();
-  const totalSize = typeof input.totalSize === 'number'
-    ? input.totalSize
-    : await getIndexedDBVideoCacheSize(input.cacheKey);
+  const totalSize =
+    typeof input.totalSize === 'number'
+      ? input.totalSize
+      : await getIndexedDBVideoCacheSize(input.cacheKey);
 
   const manifest: IndexedDBVideoCacheManifest = {
     cacheKey: input.cacheKey,
@@ -376,7 +427,9 @@ async function deleteRecordsByCacheKey(
   });
 }
 
-export async function deleteIndexedDBVideoCache(cacheKey: string): Promise<void> {
+export async function deleteIndexedDBVideoCache(
+  cacheKey: string
+): Promise<void> {
   const db = await openIndexedDBVideoCache();
   await deleteRecordsByCacheKey(db, SEGMENTS_STORE, cacheKey);
   await deleteRecordsByCacheKey(db, ASSETS_STORE, cacheKey);
@@ -396,7 +449,11 @@ export async function deleteIndexedDBVideoCacheByEpisode(
   videoId: string,
   episodeIndex: number
 ): Promise<void> {
-  const manifest = await getIndexedDBVideoManifestByEpisode(source, videoId, episodeIndex);
+  const manifest = await getIndexedDBVideoManifestByEpisode(
+    source,
+    videoId,
+    episodeIndex
+  );
   if (manifest) {
     await deleteIndexedDBVideoCache(manifest.cacheKey);
     return;
@@ -415,7 +472,9 @@ export async function getIndexedDBVideoStorageUsage(): Promise<{
   const tx = db.transaction([MANIFESTS_STORE], 'readonly');
   const store = tx.objectStore(MANIFESTS_STORE);
   const request = store.getAll();
-  const manifests = await requestToPromise<IndexedDBVideoCacheManifest[]>(request);
+  const manifests = await requestToPromise<IndexedDBVideoCacheManifest[]>(
+    request
+  );
 
   return manifests.reduce(
     (acc, manifest) => ({
@@ -453,7 +512,8 @@ export async function getBrowserStorageEstimate(): Promise<StorageEstimate | nul
 function waitForServiceWorkerActivation(
   registration: ServiceWorkerRegistration
 ): Promise<ServiceWorkerRegistration> {
-  const worker = registration.installing || registration.waiting || registration.active;
+  const worker =
+    registration.installing || registration.waiting || registration.active;
 
   if (!worker || worker.state === 'activated') {
     return Promise.resolve(registration);
@@ -475,7 +535,9 @@ function waitForServiceWorkerActivation(
   });
 }
 
-async function waitForServiceWorkerController(timeoutMs = 2500): Promise<boolean> {
+async function waitForServiceWorkerController(
+  timeoutMs = 2500
+): Promise<boolean> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
     return false;
   }
@@ -484,22 +546,32 @@ async function waitForServiceWorkerController(timeoutMs = 2500): Promise<boolean
 
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
-      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      navigator.serviceWorker.removeEventListener(
+        'controllerchange',
+        onControllerChange
+      );
       resolve(Boolean(navigator.serviceWorker.controller));
     }, timeoutMs);
 
     const onControllerChange = () => {
       window.clearTimeout(timer);
-      navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+      navigator.serviceWorker.removeEventListener(
+        'controllerchange',
+        onControllerChange
+      );
       resolve(true);
     };
 
-    navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+    navigator.serviceWorker.addEventListener(
+      'controllerchange',
+      onControllerChange
+    );
   });
 }
 
 export async function ensureIndexedDBVideoServiceWorker(): Promise<boolean> {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  if (typeof window === 'undefined' || typeof navigator === 'undefined')
+    return false;
   if (!('serviceWorker' in navigator)) return false;
 
   try {
@@ -511,7 +583,10 @@ export async function ensureIndexedDBVideoServiceWorker(): Promise<boolean> {
     await waitForServiceWorkerActivation(registration);
     return waitForServiceWorkerController();
   } catch (error) {
-    console.warn('[IndexedDBVideo] Service Worker 不可用，降级为 Blob URL 播放:', error);
+    console.warn(
+      '[IndexedDBVideo] Service Worker 不可用，降级为 Blob URL 播放:',
+      error
+    );
     return false;
   }
 }
@@ -561,7 +636,10 @@ export async function createIndexedDBVideoBlobPlaybackUrl(
       const segment = await getIndexedDBVideoSegment(cacheKey, segmentIndex);
       if (!segment?.data) {
         objectUrls.forEach((url) => URL.revokeObjectURL(url));
-        return { hasLocal: false, reason: `缺少 IndexedDB 分片 ${segmentIndex + 1}` };
+        return {
+          hasLocal: false,
+          reason: `缺少 IndexedDB 分片 ${segmentIndex + 1}`,
+        };
       }
 
       const segmentUrl = URL.createObjectURL(segment.data);
@@ -619,7 +697,11 @@ export async function getIndexedDBVideoPlaybackUrl(
   options: { preferServiceWorker?: boolean } = {}
 ): Promise<IndexedDBVideoPlaybackResult> {
   try {
-    const manifest = await getIndexedDBVideoManifestByEpisode(source, videoId, episodeIndex);
+    const manifest = await getIndexedDBVideoManifestByEpisode(
+      source,
+      videoId,
+      episodeIndex
+    );
     if (!manifest?.completed) {
       return { hasLocal: false, reason: '未找到 IndexedDB 本地缓存' };
     }
