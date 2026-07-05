@@ -4420,7 +4420,14 @@ function PlayPageClient() {
       );
     };
 
-    const fetchSourcesData = async (query: string): Promise<SearchResult[]> => {
+    const buildCompactWhitespaceQuery = (query: string): string => {
+      return query.trim().replace(/[\s\u3000]+/g, '');
+    };
+
+    const fetchSourcesData = async (
+      query: string,
+      options: { enableCompactFallback?: boolean } = {}
+    ): Promise<SearchResult[]> => {
       // 根据搜索词获取全部源信息
       setHasCompletedSearchRequest(false);
       setFallbackRecommendations([]);
@@ -4428,38 +4435,54 @@ function PlayPageClient() {
       let fallbackCachedResults: SearchResult[] = [];
 
       try {
-        const cachedPayload = readSearchCache(query);
-        if (cachedPayload) {
-          console.log(`[Play] 使用 sessionStorage ${cachedPayload.status === 'partial' ? '临时' : '完整'}缓存的搜索结果`);
-          setFallbackRecommendations(buildFallbackRecommendations(cachedPayload.results, query));
+        const searchWithQuery = async (searchQuery: string): Promise<SearchResult[]> => {
+          const trimmedQuery = searchQuery.trim();
+          const cachedPayload = readSearchCache(trimmedQuery);
+          if (cachedPayload) {
+            console.log(`[Play] 使用 sessionStorage ${cachedPayload.status === 'partial' ? '临时' : '完整'}缓存的搜索结果`);
+            setFallbackRecommendations(buildFallbackRecommendations(cachedPayload.results, trimmedQuery));
 
-          const cachedResults = filterSourcesForCurrentVideo(cachedPayload.results);
-          fallbackCachedResults = cachedResults;
-          setAvailableSources(applyCorrectionsToSources(cachedResults));
+            const cachedResults = filterSourcesForCurrentVideo(cachedPayload.results);
+            fallbackCachedResults = cachedResults;
+            setAvailableSources(applyCorrectionsToSources(cachedResults));
 
-          if (cachedPayload.status === 'complete') {
-            setHasCompletedSearchRequest(true);
-            return cachedResults;
+            if (cachedPayload.status === 'complete') {
+              setHasCompletedSearchRequest(true);
+              return cachedResults;
+            }
           }
+
+          // 没有缓存或只有 partial 缓存时，重新请求完整搜索结果
+          const response = await fetch(
+            appendSpecialSourceParam(`/api/search?q=${encodeURIComponent(trimmedQuery)}`)
+          );
+          if (!response.ok) {
+            throw new Error('搜索失败');
+          }
+          const data = await response.json();
+          const allResults = (data.results || []) as SearchResult[];
+
+          writeCompleteSearchCache(trimmedQuery, allResults);
+          setHasCompletedSearchRequest(true);
+          setFallbackRecommendations(buildFallbackRecommendations(allResults, trimmedQuery));
+
+          const results = filterSourcesForCurrentVideo(allResults);
+          setAvailableSources(applyCorrectionsToSources(results));
+          return results;
+        };
+
+        const primaryResults = await searchWithQuery(query);
+        if (primaryResults.length > 0 || !options.enableCompactFallback) {
+          return primaryResults;
         }
 
-        // 没有缓存或只有 partial 缓存时，重新请求完整搜索结果
-        const response = await fetch(
-          appendSpecialSourceParam(`/api/search?q=${encodeURIComponent(query.trim())}`)
-        );
-        if (!response.ok) {
-          throw new Error('搜索失败');
+        const compactQuery = buildCompactWhitespaceQuery(query);
+        if (!compactQuery || compactQuery === query.trim()) {
+          return primaryResults;
         }
-        const data = await response.json();
-        const allResults = (data.results || []) as SearchResult[];
 
-        writeCompleteSearchCache(query, allResults);
-        setHasCompletedSearchRequest(true);
-        setFallbackRecommendations(buildFallbackRecommendations(allResults, query));
-
-        const results = filterSourcesForCurrentVideo(allResults);
-        setAvailableSources(applyCorrectionsToSources(results));
-        return results;
+        console.log(`[Play] 原始搜索无匹配，尝试去空白备用搜索: ${compactQuery}`);
+        return await searchWithQuery(compactQuery);
       } catch (err) {
         setSourceSearchError(err instanceof Error ? err.message : '搜索失败');
         if (fallbackCachedResults.length > 0) {
@@ -4618,7 +4641,9 @@ function PlayPageClient() {
         });
       } else {
         // 没有source和id，正常搜索流程
-        sourcesInfo = await fetchSourcesData(searchTitle || videoTitle);
+        sourcesInfo = await fetchSourcesData(searchTitle || videoTitle, {
+          enableCompactFallback: true,
+        });
       }
 
       if (!detailData && sourcesInfo.length === 0) {
@@ -7646,17 +7671,42 @@ function PlayPageClient() {
                   return;
                 }
 
-                // 如果在 PWA 模式下，直接使用容器全屏（可以隐藏状态栏）
+                const enterNativeVideoFullscreen = () => {
+                  const videoElement = artPlayerRef.current?.template
+                    ?.$video as (HTMLVideoElement & {
+                      webkitEnterFullscreen?: () => void | Promise<void>;
+                      webkitEnterFullScreen?: () => void | Promise<void>;
+                    }) | undefined;
+
+                  if (!videoElement) return false;
+
+                  const enterFullscreen =
+                    videoElement.webkitEnterFullscreen ||
+                    videoElement.webkitEnterFullScreen ||
+                    videoElement.requestFullscreen;
+
+                  if (!enterFullscreen) return false;
+
+                  try {
+                    const result = enterFullscreen.call(videoElement);
+                    if (result && typeof result.catch === 'function') {
+                      result.catch((err: Error) => {
+                        console.error('iOS 原生全屏失败:', err);
+                        if (artPlayerRef.current) {
+                          artPlayerRef.current.fullscreenWeb = true;
+                        }
+                      });
+                    }
+                    return true;
+                  } catch (err) {
+                    console.error('iOS 原生全屏失败:', err);
+                    return false;
+                  }
+                };
+
+                // PWA 中直接使用 iOS 原生视频全屏，避免系统状态栏覆盖网页全屏
                 if (isPWA) {
-                  const container = artPlayerRef.current.template.$container;
-                  if (container && container.webkitEnterFullscreen) {
-                    container.webkitEnterFullscreen().catch((err: Error) => {
-                      console.error('PWA 全屏失败:', err);
-                      // 如果失败，降级使用网页全屏
-                      artPlayerRef.current.fullscreenWeb = true;
-                    });
-                  } else {
-                    // 不支持原生全屏，使用网页全屏
+                  if (!enterNativeVideoFullscreen()) {
                     artPlayerRef.current.fullscreenWeb = true;
                   }
                   return;
@@ -7758,14 +7808,9 @@ function PlayPageClient() {
                         artPlayerRef.current.fullscreenWeb = true;
                       }
                     } else if (action === 'native') {
-                      // 原生全屏（尝试使用浏览器的全屏 API）
-                      if (artPlayerRef.current && artPlayerRef.current.template.$video) {
-                        const videoElement = artPlayerRef.current.template.$video;
-                        if (videoElement.requestFullscreen) {
-                          videoElement.requestFullscreen();
-                        } else if ((videoElement as any).webkitEnterFullscreen) {
-                          (videoElement as any).webkitEnterFullscreen();
-                        }
+                      // 原生视频全屏（iOS 下可隐藏系统状态栏，但会进入系统播放器）
+                      if (!enterNativeVideoFullscreen() && artPlayerRef.current) {
+                        artPlayerRef.current.fullscreenWeb = true;
                       }
                     }
 
